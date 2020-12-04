@@ -12,6 +12,7 @@ import os,glob
 colors_file = "data/random_colors.200"
 
 app = dash.Dash(__name__, external_stylesheets=['https://codepen.io/chriddyp/pen/bWLwgP.css'])
+server = app.server
 
 class ClusterViz():
 
