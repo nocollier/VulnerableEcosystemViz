@@ -8,6 +8,7 @@ import plotly.express as px
 import numpy as np
 import plotly.graph_objects as go
 import os,glob
+import pickle
 
 colors_file = "data/random_colors.200"
 
@@ -21,11 +22,12 @@ class ClusterViz():
         self.selected_case = None
         self.selected_k = None
         self.df = self.dfu = self.dfc = self.dfi = self.dfr = None
-        self.names =  ["gpp [g m-2 d-1]","seasonal pr [mm d-1]","tas [degK]"]
-        self.t = np.asarray(range(1850,2101,10),dtype=int)
-        self.selected_t0 = self.t[0]
-        self.selected_tf = self.t[-2]
-
+        self.names = None # ["gpp [g m-2 d-1]","seasonal pr [mm d-1]","tas [degK]"]
+        self.t = None # np.asarray(range(1850,2101,10),dtype=int)
+        self.selected_t0 = None # self.t[0]
+        self.selected_tf = None # self.t[-2]
+        self.res = None
+        
     def FindDatafiles(self):
         clusters = glob.glob("data/clusters*")
         seeds    = glob.glob("data/seeds*")
@@ -43,6 +45,8 @@ class ClusterViz():
                     ks[case].append(int(cluster.split(".")[-1]))
             ks[case] = sorted(ks[case])
         self.cases = ks
+        self.selected_case = list(self.cases.keys())[0]
+        self.selected_k = ks[self.selected_case][0]
 
     def LoadDatasets(self):
         
@@ -51,26 +55,30 @@ class ClusterViz():
         seed_file = "data/seeds.out.%s.%d.final" % (case,k)
         cluster_file = "data/clusters.out.%s.%d" % (case,k)
         coords_file = "data/coords.%s" % (case)
+        years_file = "data/years.%s" % (case)
+        names_file = "data/names.%s" % (case)
         
         # these are things that we would need to read out of files
-        t = self.t
-        names = self.names
-        conversions = {"gpp [g m-2 d-1]"      : 8.640000e+00,
-                       "seasonal pr [mm d-1]" : 8.655580e-03,
-                       "tas [degK]"           : 1e-7}
+        t = np.fromfile(years_file,sep=' ')
+        t = np.hstack([t,2*t[-1]-t[-2]])
+        self.t = t
+        if self.selected_t0 is None: self.selected_t0 = self.t[0]
+        if self.selected_tf is None: self.selected_tf = self.t[-2]
+        with open(names_file,'rb') as f:
+            names = self.names = pickle.load(f)
 
         # read in the clustering datafiles
         df  = pd.read_csv(seed_file           ,sep="\t",header=None,names=['junk',]+names)
         dfu = pd.read_csv(seed_file + ".unstd",sep=" " ,header=None,names=['junk',]+names)
         dfc = pd.read_csv(coords_file         ,sep=" " ,header=None,names=['lon','lat'])
         dfi = pd.read_csv(cluster_file        ,sep=" " ,header=None,names=['id'])
-        for key in conversions: dfu[key] *= conversions[key]
         
         # intermediate quantities
         ntimes = t.size-1
         ncells = int(dfi.size / ntimes)
         dfc = dfc.iloc[:ncells] # we only need the first time slice of coordinates
         dfc.lon -= 180
+        self.res = np.sqrt(((dfc.lat-dfc.lat[0])**2 + (dfc.lon-dfc.lon[0])**2).sort_values())[1]
         
         # reduce the cluster dataframes
         dfi = pd.DataFrame(dict(id=dfi.id,cell=np.tile(range(ncells),ntimes),time=np.repeat(t[:-1],ncells)))
@@ -217,25 +225,57 @@ class ClusterViz():
 
 cv = ClusterViz()
 cv.FindDatafiles()
+cv.LoadDatasets()
 cv.GenerateLayout()
     
 @app.callback(
-    [Output('k','options'),
-     Output('k','value')],
+    [Output('k','options'),Output('k','value'),
+     Output('t0','options'), Output('t0','value'),
+     Output('tf','options'), Output('tf','value'),
+     Output('p1x','options'), Output('p1x','value'),
+     Output('p1y','options'), Output('p1y','value'),
+     Output('p2x','options'), Output('p2x','value'),
+     Output('p2y','options'), Output('p2y','value'),
+     Output('p3x','options'), Output('p3x','value'),
+     Output('p3y','options'), Output('p3y','value')],
     Input('case','value')
 )
 def SelectCase(case):
+    """
+    Once the case is selected, we need to populate menus, reload the
+    datafiles, and populate graphs.
+    """
     cv.selected_case = case
+    
+    # Choose the k value and reload datasets. Keep the current k if it
+    # is available in the new case.
     k_options = [dict(label=n,value=n) for n in cv.cases[case]]
-    k_names = [n for n in cv.cases[case]]
-    return k_options,k_names[0]
+    if cv.selected_k not in cv.cases[case]: cv.selected_k = cv.cases[case][0]
+    cv.LoadDatasets()
+    
+    # Times depend on the files being updated. Keep the current times
+    # if they are available in the new case/k.
+    time_options = [dict(label=n,value=n) for n in cv.t[:-1]]
+    if cv.selected_t0 not in cv.t[:-1]: cv.selected_t0 = cv.t[ 0]
+    if cv.selected_tf not in cv.t[:-1]: cv.selected_tf = cv.t[-2]
+        
+    # Update parameter plot options
+    p_options = [dict(label=n,value=n) for n in cv.names]
+    
+    return (k_options,cv.selected_k,
+            time_options,cv.selected_t0,
+            time_options,cv.selected_tf,
+            p_options,cv.names[1],
+            p_options,cv.names[0],
+            p_options,cv.names[2],
+            p_options,cv.names[0],
+            p_options,cv.names[2],
+            p_options,cv.names[1])
 
 @app.callback(
     [Output('g1', 'figure'),
      Output('g2', 'figure'),
-     Output('g3', 'figure'),
-     Output('t0', 'value'),
-     Output('tf', 'value')],
+     Output('g3', 'figure')],
     [Input('k', 'value'),
      Input('g1', 'selectedData'),
      Input('g2', 'selectedData'),
@@ -258,9 +298,7 @@ def UpdateParameterPlots(value, selection1, selection2, selection3, v1x, v1y, v2
                 [p['customdata'] for p in selected_data['points']])    
     return [cv.UpdateParameterPlots(v1x, v1y, selectedpoints, selection1),
             cv.UpdateParameterPlots(v2x, v2y, selectedpoints, selection2),
-            cv.UpdateParameterPlots(v3x, v3y, selectedpoints, selection3),
-            cv.selected_t0,
-            cv.selected_tf]
+            cv.UpdateParameterPlots(v3x, v3y, selectedpoints, selection3)]
 
 @app.callback(
     [Output('line', 'figure'),
@@ -269,21 +307,25 @@ def UpdateParameterPlots(value, selection1, selection2, selection3, v1x, v1y, v2
      Output('T0', 'children'),
      Output('Tf', 'children')],
     [Input('t0', 'value'),
-     Input('tf', 'value')]
+     Input('tf', 'value'),
+     Input('k', 'value')]
 )
-def UpdateLineAndMaps(t0,tf):
-
+def UpdateLineAndMaps(t0,tf,k):
     if cv.df is None: raise PreventUpdate
     colors = [c.strip() for c in open(colors_file).readlines()[:(cv.df.index.max()-cv.df.index.min()+1)]]
     t = cv.t
     cv.selected_t0 = t0
     cv.selected_tf = tf
     
+    # for some reason datasets aren't always up to date at this point
+    if len(cv.dfi.query("time == %d" % t0).id.unique()) != k: cv.LoadDatasets()
+    size = int(round((9-4)/(2.8125-1.25)*(cv.res-1.25)+4))
+    
     # left map
     q = cv.dfi.query("time == %d" % t0)
     q = pd.DataFrame({'id':q.id.to_numpy(),'lat':cv.dfc.lat.to_numpy(),'lon':cv.dfc.lon.to_numpy()})
     f1 = px.scatter(q,x='lon',y='lat',color='id',color_continuous_scale=colors)
-    f1.update_traces(marker=dict(size=4))
+    f1.update_traces(marker=dict(size=size))
     f1.update_layout(margin={'l': 20, 'r': 0, 'b': 15, 't': 5})
     f1.update(layout_coloraxis_showscale=False)
 
@@ -291,7 +333,7 @@ def UpdateLineAndMaps(t0,tf):
     q = cv.dfi.query("time == %d" % tf)
     q = pd.DataFrame({'id':q.id.to_numpy(),'lat':cv.dfc.lat.to_numpy(),'lon':cv.dfc.lon.to_numpy()})
     f2 = px.scatter(q,x='lon',y='lat',color='id',color_continuous_scale=colors)
-    f2.update_traces(marker=dict(size=4))
+    f2.update_traces(marker=dict(size=size))
     f2.update_layout(margin={'l': 20, 'r': 0, 'b': 15, 't': 5})
     f2.update(layout_coloraxis_showscale=False)
 
@@ -305,7 +347,7 @@ def UpdateLineAndMaps(t0,tf):
                             mode='lines',line=dict(color='black',dash='dash')))
     ln.update_layout(xaxis=dict(range=[t[0]-dt,t[-1]+dt]),
                      showlegend=False,margin={'l': 20, 'r': 0, 'b': 15, 't': 5})
-    return ln,f1,f2,"Initial Cluster Map (%g's)" % t0,"Final Cluster Map (%g's)" % tf
+    return ln,f1,f2,"Initial Cluster Map (%g)" % t0,"Final Cluster Map (%g)" % tf
 
 if __name__ == "__main__":
     app.run_server(debug=True)
